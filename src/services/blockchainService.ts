@@ -248,6 +248,7 @@ export class BlockchainService {
    */
   private async pollEvents(): Promise<void> {
     if (!this.isPolling) {
+      logger.debug("Polling service is stopped, exiting pollEvents loop");  
       return;
     }
 
