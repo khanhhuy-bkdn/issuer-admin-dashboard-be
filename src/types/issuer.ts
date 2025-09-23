@@ -12,12 +12,15 @@ export interface IssuerData {
   updatedAt: number;
   txHash: string;
   blockNumber: number;
+  feePerCategory?: number;
+  registrationTime?: number;
 }
 
 export enum IssuerStatus {
   PENDING = 'pending',
   APPROVED = 'approved',
-  REJECTED = 'rejected'
+  REJECTED = 'rejected',
+  REVOKED = 'revoked'
 }
 
 export interface IssuerApplicationSubmittedEvent {
@@ -34,6 +37,14 @@ export interface IssuerApprovedEvent {
   issuer: string;
   attestationUID: string;
   approveFixedFee: boolean;
+  feePerCategory: number;
+  registrationTime : number;
+}
+
+export interface IssuerRevokedEvent {
+  caller: string;
+  issuer: string;
+  attestationUID: string;
 }
 
 export interface IssuerRejectedEvent {

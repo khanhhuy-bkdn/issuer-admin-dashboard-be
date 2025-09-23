@@ -8,18 +8,19 @@ import {
   IssuerApplicationSubmittedEvent,
   IssuerApprovedEvent,
   IssuerRejectedEvent,
-  EventMetadata
+  EventMetadata,
+  IssuerRevokedEvent
 } from '../types/issuer';
 
 export class BlockchainService {
   private wsProvider: WebSocketProvider | null = null;
   private rpcProvider: JsonRpcProvider;
-  private contract: Contract | null = null;
+  public contract: Contract | null = null;
   private isListening: boolean = false;
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 5;
   private reconnectDelay: number = 5000;
-  
+
   // Polling service properties
   private isPolling: boolean = false;
   private pollingInterval: NodeJS.Timeout | null = null;
@@ -52,7 +53,7 @@ export class BlockchainService {
     // WebSocket event handlers for Ethers v6
     // Note: Ethers v6 WebSocketProvider doesn't expose 'open', 'close', 'error' events directly
     // We'll handle connection status through other means
-    
+
     // Listen for network events instead
     this.wsProvider.on('network', (newNetwork, oldNetwork) => {
       if (newNetwork) {
@@ -153,11 +154,14 @@ export class BlockchainService {
         approveFixedFee: boolean,
         event: any
       ) => {
+        const issuerInfo = await this.contract!.getIssuerInfo(issuer);
         await this.handleIssuerApproved({
           caller,
           issuer,
           attestationUID,
-          approveFixedFee
+          approveFixedFee,
+          feePerCategory: Number(issuerInfo.feePerCategory),
+          registrationTime: Number(issuerInfo.registrationTime)
         }, {
           txHash: event.log.transactionHash,
           blockNumber: event.log.blockNumber,
@@ -174,6 +178,24 @@ export class BlockchainService {
         await this.handleIssuerRejected({
           caller,
           issuer
+        }, {
+          txHash: event.log.transactionHash,
+          blockNumber: event.log.blockNumber,
+          timestamp: Date.now()
+        });
+      });
+
+      // Listen to IssuerRevoked events
+      this.contract.on('IssuerRevoked', async (
+        caller: string,
+        issuer: string,
+        attestationUID: string,
+        event: any
+      ) => {
+        await this.handleIssuerRevoked({
+          caller,
+          issuer,
+          attestationUID
         }, {
           txHash: event.log.transactionHash,
           blockNumber: event.log.blockNumber,
@@ -220,7 +242,7 @@ export class BlockchainService {
 
     this.isPolling = true;
     logger.info('Starting event polling service with retry mechanism');
-    
+
     // Start the polling loop
     this.pollEvents();
   }
@@ -234,7 +256,7 @@ export class BlockchainService {
     }
 
     this.isPolling = false;
-    
+
     if (this.pollingInterval) {
       clearTimeout(this.pollingInterval);
       this.pollingInterval = null;
@@ -248,20 +270,20 @@ export class BlockchainService {
    */
   private async pollEvents(): Promise<void> {
     if (!this.isPolling) {
-      logger.debug("Polling service is stopped, exiting pollEvents loop");  
+      logger.debug("Polling service is stopped, exiting pollEvents loop");
       return;
     }
 
     try {
       // Get last processed block from Redis
       let lastBlock = await this.getLastProcessedBlock();
-      
+
       // Get current block number
       const currentBlock = await this.getCurrentBlockNumber();
-      
+
       if (currentBlock > lastBlock) {
         logger.info(`Polling events from block ${lastBlock + 1} to ${currentBlock}`);
-        
+
         // Get logs for the range
         const logs = await this.rpcProvider.getLogs({
           address: config.blockchain.contractAddress,
@@ -276,7 +298,7 @@ export class BlockchainService {
 
         // Update last processed block in Redis
         await this.updateLastProcessedBlock(currentBlock);
-        
+
         if (logs.length > 0) {
           logger.info(`Processed ${logs.length} events from blocks ${lastBlock + 1} to ${currentBlock}`);
         }
@@ -286,10 +308,10 @@ export class BlockchainService {
       this.pollingInterval = setTimeout(() => {
         this.pollEvents();
       }, this.pollingIntervalMs);
-      
+
     } catch (error) {
       logger.error('Polling error:', error);
-      
+
       // Retry after delay
       this.pollingInterval = setTimeout(() => {
         this.pollEvents();
@@ -325,23 +347,35 @@ export class BlockchainService {
             stakeAmount: parsed.args.stakeAmount.toString()
           }, metadata);
           break;
-          
+
         case 'IssuerApproved':
-          await this.handleIssuerApproved({
-            caller: parsed.args.caller,
-            issuer: parsed.args.issuer,
-            attestationUID: parsed.args.attestationUID,
-            approveFixedFee: parsed.args.approveFixedFee
-          }, metadata);
-          break;
-          
+          {
+            const issuerInfo = await this.contract!.getIssuerInfo(parsed.args.issuer);
+            await this.handleIssuerApproved({
+              caller: parsed.args.caller,
+              issuer: parsed.args.issuer,
+              attestationUID: parsed.args.attestationUID,
+              approveFixedFee: parsed.args.approveFixedFee,
+              feePerCategory: Number(issuerInfo.feePerCategory),
+              registrationTime: Number(issuerInfo.registrationTime)
+            }, metadata);
+            break;
+          }
+
         case 'IssuerRejected':
           await this.handleIssuerRejected({
             caller: parsed.args.caller,
             issuer: parsed.args.issuer
           }, metadata);
           break;
-          
+
+        case 'IssuerRevoked':
+          await this.handleIssuerRevoked({
+            caller: parsed.args.caller,
+            issuer: parsed.args.issuer,
+            attestationUID: parsed.args.attestationUID
+          }, metadata);
+          break;
         default:
           logger.debug(`Unknown event type: ${parsed.eventName}`);
       }
@@ -357,11 +391,11 @@ export class BlockchainService {
     try {
       const redis = redisClient.getClient();
       const lastBlockStr = await redis.get(this.lastBlockRedisKey);
-      
+
       if (lastBlockStr) {
         return parseInt(lastBlockStr, 10);
       }
-      
+
       // If no last block in Redis, start from current block
       const currentBlock = await this.getCurrentBlockNumber();
       await this.updateLastProcessedBlock(currentBlock);
@@ -408,7 +442,7 @@ export class BlockchainService {
           }, this.retryDelayMs);
         }
       };
-      
+
       subscribe();
     };
 
@@ -449,11 +483,14 @@ export class BlockchainService {
       event: any
     ) => {
       try {
+        const issuerInfo = await this.contract!.getIssuerInfo(event.issuer);
         await this.handleIssuerApproved({
           caller,
           issuer,
           attestationUID,
-          approveFixedFee
+          approveFixedFee,
+          feePerCategory: Number(issuerInfo.feePerCategory),
+          registrationTime: Number(issuerInfo.registrationTime)
         }, {
           txHash: event.log.transactionHash,
           blockNumber: event.log.blockNumber,
@@ -481,6 +518,27 @@ export class BlockchainService {
         });
       } catch (error) {
         logger.error('Error handling IssuerRejected event:', error);
+      }
+    });
+
+    subscribeToEvent('IssuerRevoked', async (
+      caller: string,
+      issuer: string,
+      attestationUID: string,
+      event: any
+    ) => {
+      try {
+        await this.handleIssuerRevoked({
+          caller,
+          issuer,
+          attestationUID
+        }, {
+          txHash: event.log.transactionHash,
+          blockNumber: event.log.blockNumber,
+          timestamp: Date.now()
+        });
+      } catch (error) {
+        logger.error('Error handling IssuerApproved event:', error);
       }
     });
 
@@ -517,15 +575,38 @@ export class BlockchainService {
         issuer: event.issuer,
         attestationUID: event.attestationUID,
         txHash: metadata.txHash,
-        blockNumber: metadata.blockNumber
+        blockNumber: metadata.blockNumber,
+        approveFixedFee: event.approveFixedFee,
+        feePerCategory: event.feePerCategory,
+        registrationTime: event.registrationTime
       });
-
       await issuerService.handleIssuerApproved(event, metadata);
     } catch (error) {
       logger.error('Error handling IssuerApproved event:', error);
       // Implement retry logic here if needed
     }
   }
+
+  private async handleIssuerRevoked(
+    event: IssuerRevokedEvent,
+    metadata: EventMetadata
+  ): Promise<void> {
+    try {
+      logger.info('Processing IssuerRevoked event', {
+        caller: event.caller,
+        issuer: event.issuer,
+        attestationUID: event.attestationUID,
+        txHash: metadata.txHash,
+        blockNumber: metadata.blockNumber
+      });
+
+      await issuerService.handleIssuerRevoked(event, metadata);
+    } catch (error) {
+      logger.error('Error handling IssuerRevoked event:', error);
+      // Implement retry logic here if needed
+    }
+  }
+
 
   private async handleIssuerRejected(
     event: IssuerRejectedEvent,
@@ -556,6 +637,7 @@ export class BlockchainService {
       const submittedEvent = this.contract!.interface.getEvent('IssuerApplicationSubmitted');
       const approvedEvent = this.contract!.interface.getEvent('IssuerApproved');
       const rejectedEvent = this.contract!.interface.getEvent('IssuerRejected');
+      const revokedEvent = this.contract!.interface.getEvent('IssuerRevoked');
 
       const filter = {
         address: config.blockchain.contractAddress,
@@ -565,14 +647,15 @@ export class BlockchainService {
           [
             submittedEvent!.topicHash,
             approvedEvent!.topicHash,
-            rejectedEvent!.topicHash
+            rejectedEvent!.topicHash,
+            revokedEvent!.topicHash
           ]
         ]
       };
 
       const logs = await this.rpcProvider.getLogs(filter);
       logger.info(`Retrieved ${logs.length} historical events from block ${fromBlock} to ${toBlock}`);
-      
+
       return logs;
     } catch (error) {
       logger.error('Error getting historical events:', error);
@@ -622,11 +705,11 @@ export class BlockchainService {
   async disconnect(): Promise<void> {
     await this.stopListening();
     await this.stopPolling();
-    
+
     if (this.wsProvider) {
       this.wsProvider.destroy();
     }
-    
+
     logger.info('Blockchain service disconnected');
   }
 }

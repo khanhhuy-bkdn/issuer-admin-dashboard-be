@@ -8,7 +8,8 @@ import {
   IssuerApplicationSubmittedEvent,
   IssuerApprovedEvent,
   IssuerRejectedEvent,
-  EventMetadata
+  EventMetadata,
+  IssuerRevokedEvent
 } from '../types/issuer';
 
 interface BackfillOptions {
@@ -43,7 +44,7 @@ class BackfillService {
       const fromBlock = Math.max(startBlock, lastProcessedBlock + 1);
 
       // Get current block number if endBlock is 'latest'
-      const toBlock = endBlock === 'latest' 
+      const toBlock = endBlock === 'latest'
         ? await blockchainService.getCurrentBlockNumber()
         : endBlock;
 
@@ -60,25 +61,25 @@ class BackfillService {
 
       while (currentBlock <= toBlock) {
         const batchEndBlock = Math.min(currentBlock + batchSize - 1, toBlock);
-        
+
         logger.info(`Processing batch: blocks ${currentBlock} to ${batchEndBlock}`);
 
         try {
           const logs = await blockchainService.getHistoricalEvents(currentBlock, batchEndBlock);
           const eventsProcessed = await this.processLogs(logs);
-          
+
           totalEventsProcessed += eventsProcessed;
-          
+
           // Update last processed block
           await this.setLastProcessedBlock(batchEndBlock);
-          
+
           logger.info(`Batch completed: ${eventsProcessed} events processed`);
-          
+
           // Delay between batches to avoid rate limiting
           if (currentBlock < toBlock && delayBetweenBatches > 0) {
             await this.delay(delayBetweenBatches);
           }
-          
+
         } catch (error) {
           logger.error(`Error processing batch ${currentBlock}-${batchEndBlock}:`, error);
           // Continue with next batch instead of failing completely
@@ -88,7 +89,7 @@ class BackfillService {
       }
 
       logger.info(`Backfill completed. Total events processed: ${totalEventsProcessed}`);
-      
+
     } catch (error) {
       logger.error('Backfill process failed:', error);
       throw error;
@@ -103,7 +104,7 @@ class BackfillService {
     for (const log of logs) {
       try {
         const parsedEvent = blockchainService.parseLog(log);
-        
+
         if (!parsedEvent) {
           logger.warn('Failed to parse log:', { txHash: log.transactionHash, blockNumber: log.blockNumber });
           continue;
@@ -117,7 +118,7 @@ class BackfillService {
 
         await this.processEvent(parsedEvent.eventName, parsedEvent.args, metadata);
         eventsProcessed++;
-        
+
       } catch (error) {
         logger.error('Error processing individual log:', error, {
           txHash: log.transactionHash,
@@ -145,11 +146,14 @@ class BackfillService {
         break;
 
       case 'IssuerApproved':
+        const issuerInfo = await blockchainService.contract!.getIssuerInfo(args.issuer);
         const approvedEvent: IssuerApprovedEvent = {
           caller: args.caller,
           issuer: args.issuer,
           attestationUID: args.attestationUID,
-          approveFixedFee: args.approveFixedFee
+          approveFixedFee: args.approveFixedFee,
+          feePerCategory: Number(issuerInfo.feePerCategory),
+          registrationTime: Number(issuerInfo.registrationTime)
         };
         await issuerService.handleIssuerApproved(approvedEvent, metadata);
         break;
@@ -160,6 +164,15 @@ class BackfillService {
           issuer: args.issuer
         };
         await issuerService.handleIssuerRejected(rejectedEvent, metadata);
+        break;
+
+      case 'IssuerRevoked':
+        const revokedEvent: IssuerRevokedEvent = {
+          caller: args.caller,
+          issuer: args.issuer,
+          attestationUID: args.attestationUID
+        };
+        await issuerService.handleIssuerRevoked(revokedEvent, metadata);
         break;
 
       default:
@@ -218,10 +231,10 @@ class BackfillService {
     try {
       await redisClient.connect();
       await blockchainService.initialize();
-      
+
       const lastProcessedBlock = await this.getLastProcessedBlock();
       const currentBlock = await blockchainService.getCurrentBlockNumber();
-      
+
       return { lastProcessedBlock, currentBlock };
     } catch (error) {
       logger.error('Error getting backfill status:', error);
@@ -253,7 +266,7 @@ async function main(): Promise<void> {
 
     // Parse command line arguments
     const options: BackfillOptions = {};
-    
+
     const startBlockIndex = args.indexOf('--start-block');
     if (startBlockIndex !== -1 && args[startBlockIndex + 1]) {
       options.startBlock = parseInt(args[startBlockIndex + 1], 10);
@@ -271,7 +284,7 @@ async function main(): Promise<void> {
     }
 
     await backfillService.run(options);
-    
+
   } catch (error) {
     logger.error('Backfill script failed:', error);
     process.exit(1);

@@ -9,7 +9,8 @@ import {
   IssuerRejectedEvent,
   EventMetadata,
   IssuerQueryParams,
-  IssuerListResponse
+  IssuerListResponse,
+  IssuerRevokedEvent
 } from '../types/issuer';
 
 export class IssuerService {
@@ -53,7 +54,7 @@ export class IssuerService {
 
       // Use pipeline for atomic operations
       const pipeline = this.redis.pipeline();
-      
+
       // Store issuer data as hash
       pipeline.hset(issuerKey, {
         address: issuerData.address,
@@ -103,7 +104,9 @@ export class IssuerService {
         status: IssuerStatus.APPROVED,
         attestationUID: event.attestationUID,
         approveFixedFee: event.approveFixedFee.toString(),
-        updatedAt: metadata.timestamp.toString()
+        updatedAt: metadata.timestamp.toString(),
+        feePerCategory: event.feePerCategory.toString(),
+        registrationTime: event.registrationTime.toString()
       });
 
       // Move from pending to approved list
@@ -161,6 +164,42 @@ export class IssuerService {
     }
   }
 
+
+  async handleIssuerRevoked(
+    event: IssuerRevokedEvent,
+    metadata: EventMetadata
+  ): Promise<void> {
+    try {
+      const issuerKey = this.getIssuerKey(event.issuer);
+      const approvedListKey = this.getStatusListKey(IssuerStatus.APPROVED);
+      const revokedListKey = this.getStatusListKey(IssuerStatus.REVOKED);
+
+      const pipeline = this.redis.pipeline();
+
+      // Update issuer status
+      pipeline.hset(issuerKey, {
+        status: IssuerStatus.REVOKED,
+        updatedAt: metadata.timestamp.toString()
+      });
+
+      // Move from approved to revoked list
+      pipeline.lrem(approvedListKey, 0, event.issuer.toLowerCase());
+      pipeline.lpush(revokedListKey, event.issuer.toLowerCase());
+
+      await pipeline.exec();
+
+      logger.info('Issuer revoked processed', {
+        issuer: event.issuer,
+        caller: event.caller,
+        txHash: metadata.txHash,
+        blockNumber: metadata.blockNumber
+      });
+    } catch (error) {
+      logger.error('Error handling issuer rejected event:', error);
+      throw error;
+    }
+  }
+
   // Get issuer by address
   async getIssuer(address: string): Promise<IssuerData | null> {
     try {
@@ -184,7 +223,9 @@ export class IssuerService {
         submittedAt: parseInt(data.submittedAt),
         updatedAt: parseInt(data.updatedAt),
         txHash: data.txHash,
-        blockNumber: parseInt(data.blockNumber)
+        blockNumber: parseInt(data.blockNumber),
+        feePerCategory: data.feePerCategory ? parseInt(data.feePerCategory) : undefined,
+        registrationTime: data.registrationTime ? parseInt(data.registrationTime) : undefined
       };
     } catch (error) {
       logger.error('Error getting issuer:', error);
@@ -196,18 +237,18 @@ export class IssuerService {
   async getIssuersByStatus(params: IssuerQueryParams): Promise<IssuerListResponse> {
     try {
       const { status, limit = 50, offset = 0 } = params;
-      
+
       if (!status) {
         throw new Error('Status is required');
       }
 
       const listKey = this.getStatusListKey(status);
-      const total = await this.redis.llen(listKey);
+      const total = await Array.from(new Set(await this.redis.lrange(listKey, 0, -1))).length;
       const issuerAddresses = await this.redis.lrange(listKey, offset, offset + limit - 1);
 
       const issuers: IssuerData[] = [];
-      
-      for (const address of issuerAddresses) {
+
+      for (const address of Array.from(new Set(issuerAddresses))) {
         const issuer = await this.getIssuer(address);
         if (issuer) {
           issuers.push(issuer);
