@@ -4,12 +4,108 @@ export const ISSUER_CONTRACT_ABI = [
   `event IssuerApproved(address indexed caller, address indexed issuer, bytes32 attestationUID, bool approveFixedFee)`,
   `event IssuerRejected(address indexed caller, address indexed issuer)`,
   `event IssuerRevoked(address indexed caller, address indexed issuer, bytes32 attestationUID)`,
-  `function getIssuerInfo(address issuer) view returns (tuple(address issuer, string name, bytes32[] categories, uint256 feePerCategory, tuple(bytes32 keyId, bytes publicKey, uint256 validFrom, uint256 validUntil, bool isActive, string provider)[] keyHistory, uint256 activeKeyIndex, uint256 registrationTime, bool isActive, uint256 revocationTime))`
-];
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "issuer",
+        "type": "address"
+      }
+    ],
+    "name": "getIssuerInfo",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "address",
+            "name": "issuer",
+            "type": "address"
+          },
+          {
+            "internalType": "bool",
+            "name": "isActive",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint256",
+            "name": "feePerCategory",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "activeKeyIndex",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "registrationTime",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "revocationTime",
+            "type": "uint256"
+          },
+          {
+            "internalType": "string",
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "internalType": "bytes32[]",
+            "name": "categories",
+            "type": "bytes32[]"
+          },
+          {
+            "components": [
+              {
+                "internalType": "bytes32",
+                "name": "keyId",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "uint256",
+                "name": "validFrom",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "validUntil",
+                "type": "uint256"
+              },
+              {
+                "internalType": "bool",
+                "name": "isActive",
+                "type": "bool"
+              },
+              {
+                "internalType": "bytes",
+                "name": "publicKey",
+                "type": "bytes"
+              },
+              {
+                "internalType": "string",
+                "name": "provider",
+                "type": "string"
+              }
+            ],
+            "internalType": "struct IIssuerRegistry.KeyInfo[]",
+            "name": "keyHistory",
+            "type": "tuple[]"
+          }
+        ],
+        "internalType": "struct IIssuerRegistry.IssuerInfo",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }]
 
 // Event signatures for filtering
 export const EVENT_SIGNATURES = {
-  IssuerApplicationSubmitted: 'IssuerApplicationSubmitted(address,string,string[],uint256,bytes,uint256)',
+  IssuerApplicationSubmitted: 'IssuerApplicationSubmitted(address,string,bytes32[],uint256,bytes,uint256)',
   IssuerApproved: 'IssuerApproved(address,address,bytes32,bool)',
   IssuerRejected: 'IssuerRejected(address,address)',
   IssuerRevoked: 'IssuerRevoked(address,address,bytes32)'
